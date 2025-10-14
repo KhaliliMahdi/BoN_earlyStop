@@ -4,7 +4,7 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 
 class ArmoRMPipeline:
-    def __init__(self, model_id, device_map={"": 0}, torch_dtype=torch.bfloat16, truncation=True, trust_remote_code=False, max_length=4096):
+    def __init__(self, model_id, device_map={"": 5}, torch_dtype=torch.bfloat16, truncation=True, trust_remote_code=False, max_length=4096):
         self.model = AutoModelForSequenceClassification.from_pretrained(
             model_id,
             device_map=device_map,
@@ -33,7 +33,7 @@ class ArmoRMPipeline:
             max_length=self.max_length,
         ).to(self.device)
         with torch.no_grad():
-            print(self.model.device, input_ids.device)
+            #print(self.model.device, input_ids.device)
             output = self.model(input_ids)
             score = output.score.float().item()
-        return {"score": score}
+        return score

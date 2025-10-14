@@ -1,30 +1,103 @@
 import argparse
-from transformers import AutoModelForCausalLM, AutoTokenizer
 import torch
 from utils import ArmoRMPipeline
+import transformers
+import torch
+from data_utils import load_prompts
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import torch
+from tqdm import tqdm
+import json
+from datetime import datetime
+
 
 
 
 parser = argparse.ArgumentParser(description="Generate response and score it with a reward model")
-parser.add_argument("--llm_name", type=str, required=True, help="Base LLM model name (e.g., Meta-Llama-3-8B)")
-parser.add_argument("--rm_name", type=str, required=True, help="Reward model name (e.g., ArmoRM-Llama3-8B-v0.1)")
-parser.add_argument("--prompt", type=str, default="Explain why ETFs are popular for beginner investors.", help="Prompt to generate response for")
-parser.add_argument("--max_tokens", type=int, default=150, help="Maximum tokens to generate")
+parser.add_argument("--llm_name", type=str, default='meta-llama/Meta-Llama-3-8B', help="Base LLM model name")
+parser.add_argument("--rm_name", type=str, default='RLHFlow/ArmoRM-Llama3-8B-v0.1', help="Reward model name")
+parser.add_argument("--dataset", type=str, default="./datasets/alpaca_farm_eval.json", help="Path to the dataset")
+parser.add_argument("--max_tokens", type=int, default=5000, help="Maximum tokens to generate")
+parser.add_argument("--tau", type=int, default=256, help="numer of tokens for speculative rejection")
+parser.add_argument("--n", type=int, default=120, help="numer of generated response")
+parser.add_argument("--a", type=float, default=0.5, help="percentage of rejections")
 args = parser.parse_args()
+llm_name = args.llm_name
+rm_name = args.rm_name
+dataset = args.dataset
+max_tokens = args.max_tokens
+tau = args.tau
+n = args.n
+a = args.a
+device_map={'':5}
+#pipeline = transformers.pipeline(
+#  "text-generation",
+#  model=llm_name,
+#  model_kwargs={"torch_dtype": torch.float32},
+#  device_map='auto'
+#)
+
+tokenizer = AutoTokenizer.from_pretrained(llm_name, padding_side="left")
+model = AutoModelForCausalLM.from_pretrained(llm_name, torch_dtype=torch.bfloat16, device_map=device_map, trust_remote_code=True)
+
+tokenizer.pad_token = tokenizer.eos_token
+tokenizer.padding_side = "left"
+model.config.pad_token_id = model.config.eos_token_id
+rm = ArmoRMPipeline("RLHFlow/ArmoRM-Llama3-8B-v0.1", trust_remote_code=True, device_map=device_map, torch_dtype=torch.bfloat16)
+
+#model.config.pad_token_id = tokenizer.unk_token_id 
+#tokenizer.pad_token = tokenizer.eos_token
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+filename = f"records_{timestamp}.json"
+prompts = load_prompts(dataset)
+with open(filename, "a") as f:
+    for index, prompt in enumerate(prompts):
+        print('processing prompt: ', index)
+        inputs = tokenizer(prompt, return_tensors="pt", padding=True).to(model.device)
+        num_tokens = inputs.input_ids.shape[1]
+        num_generated_tokens = 0
+        result = []
+        score = []
+        for i in tqdm(range(n)):
+            output_sequences = model.generate(**inputs, max_new_tokens=tau, do_sample=True, top_k = 50, top_p=1.0, temperature=0.7, num_return_sequences=1)
+            result.append(tokenizer.batch_decode(output_sequences, skip_special_tokens=True)[0])
+            num_generated_tokens += (output_sequences.shape[1] - num_tokens)
+            response  = result[-1]
+            l = len(prompt)
+            score.append(rm([{"role": "user", "content": prompt}, {"role": "assistant", "content": response[l+1:]}]))
+        ziplist = list(zip(result, score))
+        ziplist = sorted(ziplist, key = lambda x: x[1], reverse=True)
+        result = []
+        score = []
+        for i in tqdm(range(int(a*n))):
+            p = ziplist[i][0]
+            inputs = tokenizer(p, return_tensors="pt", padding=True).to(model.device)
+            num_tokens = inputs.input_ids.shape[1]
+            output_sequences = model.generate(**inputs, max_new_tokens=max_tokens, do_sample=True, top_k = 50, top_p=1.0, temperature=0.7, num_return_sequences=1)
+            result.append(tokenizer.batch_decode(output_sequences, skip_special_tokens=True))
+            num_generated_tokens += (output_sequences.shape[1] - num_tokens)
+            response  = result[-1]
+            l = len(prompt)
+            score.append(rm([{"role": "user", "content": prompt}, {"role": "assistant", "content": response[l+1:]}]))
+        best = score.index(max(score))
+        record = {
+            "prompt": prompt,
+            "best response": result[best],
+            "score": score[best],
+            "num_tokens": num_generated_tokens,
+            "avg_num_tokens": float(num_generated_tokens)/n
+        }
+        f.write(json.dumps(record) + "\n")
+        torch.cuda.empty_cache()
+    
+    
+    
 
 
-import transformers
-import torch
-pipeline = transformers.pipeline(
-  "text-generation",
-  model=args.llm_name,
-  model_kwargs={"torch_dtype": torch.bfloat16},
-  device = 0 if torch.cuda.is_available() else -1,
-)
-prompt = "This restaurant is awesome"
-result = pipeline(prompt, max_new_tokens=100, do_sample=True, temperature=0.7)
-response1 = result[0]['generated_text']
-print(response1)
-rm = ArmoRMPipeline("RLHFlow/ArmoRM-Llama3-8B-v0.1", trust_remote_code=True)
-score1 = rm([{"role": "user", "content": prompt}, {"role": "assistant", "content": 'hellow howaryou'}])
-print(score1)
+#result = pipeline(prompts[1], max_new_tokens=max_tokens, do_sample=True, temperature=0.7, top_p=1.0, top_k = 50)
+#print(result[0]['generated_text'])
+#print(result[-1]['generated_text'])
+#response1 = result[0]['generated_text']
+#print(response1)
+
+
