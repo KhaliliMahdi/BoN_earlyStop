@@ -53,6 +53,7 @@ timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 filename = f"records_{timestamp}.json"
 prompts = load_prompts(dataset)
 model.eval()
+rm.eval()
 with open(filename, "a") as f:
     
     for index, prompt in enumerate(prompts):
