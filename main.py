@@ -10,7 +10,11 @@ from tqdm import tqdm
 import json
 from datetime import datetime
 from torch.utils.data import DataLoader
+from accelerate import Accelerator
+from accelerate import infer_auto_device_map, dispatch_model
 
+accelerator = Accelerator()
+device = accelerator.device
 
 
 
@@ -30,28 +34,34 @@ max_tokens = args.max_tokens
 tau = args.tau
 n = args.n
 a = args.a
-device_map={'':5}
-torch.cuda.empty_cache()
+
+#torch.cuda.empty_cache()
 #pipeline = transformers.pipeline(
 #  "text-generation",
 #  model=llm_name,
 #  model_kwargs={"torch_dtype": torch.float32},
 #  device_map='auto'
 #)
-
+num_devices = accelerator.num_processes
+rank = accelerator.process_index
+device_map={'':rank}
 tokenizer = AutoTokenizer.from_pretrained(llm_name, padding_side="left")
-model = AutoModelForCausalLM.from_pretrained(llm_name, torch_dtype=torch.bfloat16, device_map=device_map, trust_remote_code=True)
+model = AutoModelForCausalLM.from_pretrained(llm_name, device_map = device_map, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True, trust_remote_code=True)
+rm = ArmoRMPipeline("RLHFlow/ArmoRM-Llama3-8B-v0.1", device_map = device_map, trust_remote_code=True, torch_dtype=torch.bfloat16)
+
+# maps model layers automatically
+#print(device_map)
+#model = dispatch_model(model, device_map=device_map)
+
 
 tokenizer.pad_token = tokenizer.eos_token
 tokenizer.padding_side = "left"
 model.config.pad_token_id = model.config.eos_token_id
-rm = ArmoRMPipeline("RLHFlow/ArmoRM-Llama3-8B-v0.1", trust_remote_code=True, device_map=device_map, torch_dtype=torch.bfloat16)
-
-#model.config.pad_token_id = tokenizer.unk_token_id 
-#tokenizer.pad_token = tokenizer.eos_token
-timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+print('rank = {}'.format(rank))
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_GPU="+str(rank))
 filename = f"records_{timestamp}.json"
 prompts = load_prompts(dataset)
+prompts = prompts[rank::num_devices]
 model.eval()
 with open(filename, "a") as f:
     
@@ -64,7 +74,6 @@ with open(filename, "a") as f:
         output_sequences = model.generate(**inputs, max_new_tokens=tau, do_sample=True, top_k = 50, top_p=1.0, temperature=0.7, num_return_sequences=n)
         generated_lengths = (output_sequences != tokenizer.pad_token_id).sum(dim=1)
         num_generated_tokens = sum((generated_lengths - num_tokens).tolist())
-        print(num_generated_tokens)
         result = tokenizer.batch_decode(output_sequences, skip_special_tokens=True)
         
         
