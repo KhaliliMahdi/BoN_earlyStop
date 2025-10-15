@@ -9,6 +9,7 @@ import torch
 from tqdm import tqdm
 import json
 from datetime import datetime
+from torch.utils.data import DataLoader
 
 
 
@@ -30,6 +31,7 @@ tau = args.tau
 n = args.n
 a = args.a
 device_map={'':5}
+torch.cuda.empty_cache()
 #pipeline = transformers.pipeline(
 #  "text-generation",
 #  model=llm_name,
@@ -50,54 +52,65 @@ rm = ArmoRMPipeline("RLHFlow/ArmoRM-Llama3-8B-v0.1", trust_remote_code=True, dev
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 filename = f"records_{timestamp}.json"
 prompts = load_prompts(dataset)
+model.eval()
 with open(filename, "a") as f:
+    
     for index, prompt in enumerate(prompts):
-        print('processing prompt: ', index)
+        print('=======processing prompt: ', index,'=========')
         inputs = tokenizer(prompt, return_tensors="pt", padding=True).to(model.device)
         num_tokens = inputs.input_ids.shape[1]
         num_generated_tokens = 0
-        result = []
+        #Response Generation
+        output_sequences = model.generate(**inputs, max_new_tokens=tau, do_sample=True, top_k = 50, top_p=1.0, temperature=0.7, num_return_sequences=n)
+        generated_lengths = (output_sequences != tokenizer.pad_token_id).sum(dim=1)
+        num_generated_tokens = sum((generated_lengths - num_tokens).tolist())
+        print(num_generated_tokens)
+        result = tokenizer.batch_decode(output_sequences, skip_special_tokens=True)
+        
+        
+        #score Generation
         score = []
-        for i in tqdm(range(n)):
-            output_sequences = model.generate(**inputs, max_new_tokens=tau, do_sample=True, top_k = 50, top_p=1.0, temperature=0.7, num_return_sequences=1)
-            result.append(tokenizer.batch_decode(output_sequences, skip_special_tokens=True)[0])
-            num_generated_tokens += (output_sequences.shape[1] - num_tokens)
-            response  = result[-1]
+        for response in tqdm(result):
             l = len(prompt)
             score.append(rm([{"role": "user", "content": prompt}, {"role": "assistant", "content": response[l+1:]}]))
+            
+        #sort score and keeping alpha*100% of the lowest score
         ziplist = list(zip(result, score))
         ziplist = sorted(ziplist, key = lambda x: x[1], reverse=True)
+        p = [ziplist[i][0] for i in range(int(n*a))]
+        loader = DataLoader(p, batch_size=4, shuffle=False)
+        del inputs
+        del output_sequences
+        del result
+        del score
         result = []
-        score = []
-        for i in tqdm(range(int(a*n))):
-            p = ziplist[i][0]
-            inputs = tokenizer(p, return_tensors="pt", padding=True).to(model.device)
-            num_tokens = inputs.input_ids.shape[1]
+        torch.cuda.empty_cache()
+        #Generate the final response and score them
+        for batch in tqdm(loader):
+            inputs = tokenizer(batch, return_tensors="pt", padding=True).to(model.device)
+            inputs_lengths = (inputs.input_ids != tokenizer.pad_token_id).sum()
             output_sequences = model.generate(**inputs, max_new_tokens=max_tokens, do_sample=True, top_k = 50, top_p=1.0, temperature=0.7, num_return_sequences=1)
-            result.append(tokenizer.batch_decode(output_sequences, skip_special_tokens=True))
-            num_generated_tokens += (output_sequences.shape[1] - num_tokens)
-            response  = result[-1]
+            result+=(tokenizer.batch_decode(output_sequences, skip_special_tokens=True))
+            generated_lengths = (output_sequences != tokenizer.pad_token_id).sum()
+            num_generated_tokens += ((generated_lengths - inputs_lengths))
+            del inputs
+            del output_sequences
+            torch.cuda.empty_cache()
+            torch.cuda.memory_summary()
+            
+        score = []
+        for response in tqdm(result):
             l = len(prompt)
             score.append(rm([{"role": "user", "content": prompt}, {"role": "assistant", "content": response[l+1:]}]))
         best = score.index(max(score))
+        print(num_generated_tokens)
         record = {
             "prompt": prompt,
             "best response": result[best],
             "score": score[best],
-            "num_tokens": num_generated_tokens,
-            "avg_num_tokens": float(num_generated_tokens)/n
+            "num_tokens": num_generated_tokens.item(),
+            "avg_num_tokens": float(num_generated_tokens.item())/n
         }
         f.write(json.dumps(record) + "\n")
         torch.cuda.empty_cache()
-    
-    
-    
-
-
-#result = pipeline(prompts[1], max_new_tokens=max_tokens, do_sample=True, temperature=0.7, top_p=1.0, top_k = 50)
-#print(result[0]['generated_text'])
-#print(result[-1]['generated_text'])
-#response1 = result[0]['generated_text']
-#print(response1)
-
 
