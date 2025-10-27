@@ -5,5 +5,6 @@ def load_prompts(file_path):
     with open(file_path, 'r') as f:
         data = json.load(f)
     prompts = [item["prompt"] for item in data]
+    index = [item["JSON_idx"] for item in data]
 
-    return prompts
+    return prompts,index
